@@ -1,0 +1,153 @@
+# ==========================================================
+
+# CHRONOS IA - Python
+
+# ==========================================================
+
+# Entornos virtuales
+
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+
+**pycache**/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribución / empaquetado
+
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Tests / cobertura
+
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+
+# Jupyter
+
+.ipynb_checkpoints/
+
+# ==========================================================
+
+# Variables de entorno / secretos
+
+# ==========================================================
+
+.env
+.env.*
+!.env.example
+
+# Certificados y claves
+
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ==========================================================
+
+# IDE / editores
+
+# ==========================================================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ==========================================================
+
+# Sistema operativo
+
+# ==========================================================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================================================
+
+# Logs
+
+# ==========================================================
+
+*.log
+logs/
+
+# ==========================================================
+
+# Archivos temporales
+
+# ==========================================================
+
+*.tmp
+*.temp
+*.bak
+*.cache
+
+# ==========================================================
+
+# Base de datos / datos locales
+
+# ==========================================================
+
+*.sqlite
+*.sqlite3
+*.db
+
+# Dumps locales de PostgreSQL
+
+*.dump
+*.backup
+
+# ==========================================================
+
+# Archivos generados por la aplicación
+
+# ==========================================================
+
+output/
+outputs/
+results/
+generated/
+tmp/
+temp/
+
+# ==========================================================
+
+# Configuración local
+
+# ==========================================================
+
+config.local.*
+settings.local.*
+docker-compose.override.yml
