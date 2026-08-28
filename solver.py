@@ -1,21 +1,48 @@
 from psycopg2.extras import RealDictCursor
+import random
 
 
-def _buscar_aula_libre(aulas_disponibles, aulas_ocupadas, dia, bloque_id):
+def _buscar_aula_libre(
+    aulas_disponibles,
+    aulas_ocupadas,
+    dia,
+    bloque_id,
+    aula_preferida=None,
+):
     """
-    Devuelve la primera aula disponible para un día/bloque.
+    Busca un aula libre.
+
+    Prioridad:
+    1. Aula preferida.
+    2. Cualquier otra aula disponible.
     """
+
+    if (
+        aula_preferida is not None
+        and (aula_preferida, dia, bloque_id) not in aulas_ocupadas
+    ):
+        return aula_preferida
+
     for aula_id in aulas_disponibles:
+        if aula_id == aula_preferida:
+            continue
+
         if (aula_id, dia, bloque_id) not in aulas_ocupadas:
             return aula_id
 
     return None
 
 
-def _validar_periodo(cur, institucion_id, periodo_lectivo_id):
+def _validar_periodo(
+    cur,
+    institucion_id,
+    periodo_lectivo_id,
+):
     """
-    Verifica que el período exista y pertenezca a la institución.
+    Verifica que el período exista y pertenezca
+    a la institución.
     """
+
     cur.execute(
         """
         SELECT
@@ -29,14 +56,18 @@ def _validar_periodo(cur, institucion_id, periodo_lectivo_id):
           AND institucion_id = %s
         LIMIT 1;
         """,
-        (periodo_lectivo_id, institucion_id),
+        (
+            periodo_lectivo_id,
+            institucion_id,
+        ),
     )
 
     periodo = cur.fetchone()
 
     if not periodo:
         raise ValueError(
-            "El período lectivo no existe o no pertenece a la institución."
+            "El período lectivo no existe o no pertenece "
+            "a la institución."
         )
 
     return periodo
@@ -45,28 +76,37 @@ def _validar_periodo(cur, institucion_id, periodo_lectivo_id):
 def optimizar_horarios_institucion(
     institucion_id: int,
     periodo_lectivo_id: int,
-    conn
+    conn,
 ):
     """
-    Genera el horario completo de una institución para un período lectivo.
+    Genera el horario completo de una institución.
 
-    Reglas:
+    Características:
 
-    - Nunca utiliza bloques de otro período.
-    - Nunca utiliza bloques de receso.
-    - Respeta días laborables.
-    - Un profesor no puede estar en dos clases simultáneamente.
-    - Un paralelo no puede estar en dos clases simultáneamente.
-    - Un aula no puede estar en dos clases simultáneamente.
+    - Solo usa bloques del período seleccionado.
+    - No utiliza recesos.
+    - Solo utiliza días laborables.
+    - Un profesor no puede tener dos clases simultáneas.
+    - Un paralelo no puede tener dos clases simultáneas.
+    - Un aula no puede tener dos clases simultáneas.
+    - Intenta mantener aula fija por paralelo.
     - Respeta horas_por_semana.
-    - Respeta permite_consecutivas y max_horas_consecutivas.
+    - Respeta permite_consecutivas.
+    - Respeta max_horas_consecutivas.
+    - Distribuye las materias entre diferentes días.
+    - Distribuye las materias entre diferentes horas.
+    - Evita repetir innecesariamente la misma hora.
+    - Utiliza múltiples intentos para evitar bloqueos
+      provocados por decisiones greedy.
+    - Solo guarda el resultado cuando todas las cargas
+      horarias están completas.
     - La operación es atómica.
-    - Si no se puede generar todo, no se elimina el horario anterior.
     """
 
     cur = conn.cursor(cursor_factory=RealDictCursor)
 
     try:
+
         # ==========================================================
         # 1. VALIDAR PERÍODO
         # ==========================================================
@@ -74,11 +114,11 @@ def optimizar_horarios_institucion(
         periodo = _validar_periodo(
             cur,
             institucion_id,
-            periodo_lectivo_id
+            periodo_lectivo_id,
         )
 
         # ==========================================================
-        # 2. OBTENER ASIGNACIONES DE CARGA
+        # 2. OBTENER ASIGNACIONES
         # ==========================================================
 
         cur.execute(
@@ -93,11 +133,16 @@ def optimizar_horarios_institucion(
                 ac.horas_por_semana,
 
                 m.nombre AS materia_nombre,
-                COALESCE(m.permite_consecutivas, FALSE)
-                    AS permite_consecutivas,
 
-                COALESCE(m.max_horas_consecutivas, 1)
-                    AS max_horas_consecutivas
+                COALESCE(
+                    m.permite_consecutivas,
+                    FALSE
+                ) AS permite_consecutivas,
+
+                COALESCE(
+                    m.max_horas_consecutivas,
+                    1
+                ) AS max_horas_consecutivas
 
             FROM asignaciones_carga ac
 
@@ -114,7 +159,7 @@ def optimizar_horarios_institucion(
             """,
             (
                 institucion_id,
-                periodo_lectivo_id
+                periodo_lectivo_id,
             ),
         )
 
@@ -155,7 +200,30 @@ def optimizar_horarios_institucion(
         ]
 
         # ==========================================================
-        # 4. OBTENER BLOQUES DEL PERÍODO
+        # 4. AULA PREFERIDA POR PARALELO
+        # ==========================================================
+
+        paralelos = []
+
+        for asig in asignaciones:
+
+            paralelo = asig["nombre_paralelo"]
+
+            if paralelo not in paralelos:
+                paralelos.append(paralelo)
+
+        aulas_preferidas_por_paralelo = {}
+
+        for indice, paralelo in enumerate(paralelos):
+
+            aulas_preferidas_por_paralelo[
+                paralelo
+            ] = aulas_disponibles[
+                indice % len(aulas_disponibles)
+            ]
+
+        # ==========================================================
+        # 5. OBTENER BLOQUES
         # ==========================================================
 
         cur.execute(
@@ -183,15 +251,8 @@ def optimizar_horarios_institucion(
                 ON td.turno_id = t.id_turno
 
             WHERE t.institucion_id = %s
-
-              -- MUY IMPORTANTE:
-              -- solamente bloques del período solicitado
               AND bt.periodo_lectivo_id = %s
-
-              -- nunca usar recreos
               AND bt.es_receso = FALSE
-
-              -- solamente días laborales
               AND td.es_dia_laboral = TRUE
 
             ORDER BY
@@ -201,25 +262,25 @@ def optimizar_horarios_institucion(
             """,
             (
                 institucion_id,
-                periodo_lectivo_id
+                periodo_lectivo_id,
             ),
         )
 
-        slots_disponibles = cur.fetchall()
+        slots = cur.fetchall()
 
-        if not slots_disponibles:
+        if not slots:
             raise ValueError(
                 "No existen bloques de tiempo laborables "
                 "para el período lectivo seleccionado."
             )
 
         # ==========================================================
-        # 5. AGRUPAR BLOQUES POR DÍA
+        # 6. AGRUPAR POR DÍA
         # ==========================================================
 
         dias_slots = {}
 
-        for slot in slots_disponibles:
+        for slot in slots:
 
             dia = slot["dia_indice"]
 
@@ -228,335 +289,613 @@ def optimizar_horarios_institucion(
 
             dias_slots[dia].append(slot)
 
-        dias_ordenados = sorted(dias_slots.keys())
+        dias_ordenados = sorted(
+            dias_slots.keys()
+        )
 
         # ==========================================================
-        # 6. ESTRUCTURAS DE CONTROL
+        # 7. ÍNDICE GLOBAL DE BLOQUES
         # ==========================================================
 
-        # Profesor ocupado
         #
-        # (profesor_id, dia, bloque_id)
-        profes_ocupados = set()
-
-        # Paralelo ocupado
+        # Esto es importante.
         #
-        # (nombre_paralelo, dia, bloque_id)
-        paralelos_ocupados = set()
-
-        # Aula ocupada
+        # El bloque 0 de lunes y el bloque 0 de martes
+        # representan la misma posición horaria.
         #
-        # (aula_id, dia, bloque_id)
-        aulas_ocupadas = set()
+        # Por ejemplo:
+        #
+        # 0 = 07:00
+        # 1 = 07:45
+        # 2 = 08:30
+        #
+        # Esto permite distribuir una materia entre distintas
+        # horas sin confundir los días.
+        #
 
-        horarios_a_insertar = []
+        posiciones_horarias = {}
 
-        # Para intentar repartir una materia entre diferentes días
-        dias_usados_por_asignacion = {
-            asig["id_asignacion_carga"]: set()
-            for asig in asignaciones
-        }
+        for dia in dias_ordenados:
+
+            for indice, slot in enumerate(
+                dias_slots[dia]
+            ):
+
+                bloque_id = slot[
+                    "id_bloque_tiempo"
+                ]
+
+                posiciones_horarias[
+                    bloque_id
+                ] = indice
 
         # ==========================================================
-        # 7. GENERAR HORARIO EN MEMORIA
+        # 8. CANDIDATOS GLOBALES
         # ==========================================================
 
-        for asig in asignaciones:
+        todos_los_slots = []
 
-            asignacion_id = asig["id_asignacion_carga"]
+        for dia in dias_ordenados:
 
-            profesor_id = asig["profesor_id"]
+            for indice, slot in enumerate(
+                dias_slots[dia]
+            ):
 
-            paralelo = asig["nombre_paralelo"]
-
-            horas_totales = int(
-                asig["horas_por_semana"]
-            )
-
-            permite_consecutivas = bool(
-                asig["permite_consecutivas"]
-            )
-
-            max_consecutivas = (
-                int(asig["max_horas_consecutivas"] or 1)
-                if permite_consecutivas
-                else 1
-            )
-
-            # Seguridad
-            if max_consecutivas < 1:
-                max_consecutivas = 1
-
-            horas_asignadas = 0
-
-            # ======================================================
-            # Intentamos distribuir las horas
-            # ======================================================
-
-            while horas_asignadas < horas_totales:
-
-                progreso = False
-
-                # Primero intentamos días que todavía no usamos
-                dias_candidatos = sorted(
-                    dias_ordenados,
-                    key=lambda dia: (
-                        dia in dias_usados_por_asignacion[
-                            asignacion_id
-                        ],
-                        dia
-                    )
+                todos_los_slots.append(
+                    {
+                        "dia": dia,
+                        "indice": indice,
+                        "slot": slot,
+                    }
                 )
 
-                for dia in dias_candidatos:
+        # ==========================================================
+        # 9. FUNCIÓN INTERNA PARA GENERAR UN INTENTO
+        # ==========================================================
 
-                    if horas_asignadas >= horas_totales:
-                        break
+        def generar_intento():
 
-                    bloques_del_dia = dias_slots[dia]
+            profes_ocupados = set()
 
-                    for indice, slot in enumerate(
-                        bloques_del_dia
-                    ):
+            paralelos_ocupados = set()
 
-                        if horas_asignadas >= horas_totales:
-                            break
+            aulas_ocupadas = set()
+
+            horarios = []
+
+            dias_usados = {
+                asig["id_asignacion_carga"]: set()
+                for asig in asignaciones
+            }
+
+            horas_usadas = {
+                asig["id_asignacion_carga"]: {}
+                for asig in asignaciones
+            }
+
+            # ------------------------------------------------------
+            # Copiamos las asignaciones.
+            #
+            # Las más difíciles van primero.
+            # ------------------------------------------------------
+
+            asignaciones_ordenadas = list(
+                asignaciones
+            )
+
+            random.shuffle(
+                asignaciones_ordenadas
+            )
+
+            asignaciones_ordenadas.sort(
+                key=lambda x: (
+                    -int(x["horas_por_semana"]),
+                    x["id_asignacion_carga"],
+                )
+            )
+
+            # ------------------------------------------------------
+            # Procesar cada asignación
+            # ------------------------------------------------------
+
+            for asig in asignaciones_ordenadas:
+
+                asignacion_id = (
+                    asig["id_asignacion_carga"]
+                )
+
+                profesor_id = (
+                    asig["profesor_id"]
+                )
+
+                paralelo = (
+                    asig["nombre_paralelo"]
+                )
+
+                horas_totales = int(
+                    asig["horas_por_semana"]
+                )
+
+                permite_consecutivas = bool(
+                    asig["permite_consecutivas"]
+                )
+
+                max_consecutivas = int(
+                    asig["max_horas_consecutivas"]
+                    or 1
+                )
+
+                if not permite_consecutivas:
+                    max_consecutivas = 1
+
+                if max_consecutivas < 1:
+                    max_consecutivas = 1
+
+                aula_preferida = (
+                    aulas_preferidas_por_paralelo[
+                        paralelo
+                    ]
+                )
+
+                horas_asignadas = 0
+
+                # --------------------------------------------------
+                # Guardamos los bloques de ESTA asignación.
+                # --------------------------------------------------
+
+                bloques_asignacion = []
+
+                # --------------------------------------------------
+                # Mientras falten horas
+                # --------------------------------------------------
+
+                while (
+                    horas_asignadas
+                    < horas_totales
+                ):
+
+                    candidatos = []
+
+                    # ==============================================
+                    # BUSCAR CANDIDATOS
+                    # ==============================================
+
+                    for candidato in todos_los_slots:
+
+                        dia = candidato[
+                            "dia"
+                        ]
+
+                        indice = candidato[
+                            "indice"
+                        ]
+
+                        slot = candidato[
+                            "slot"
+                        ]
 
                         bloque_id = slot[
                             "id_bloque_tiempo"
                         ]
 
                         # ------------------------------------------
-                        # Profesor
+                        # PROFESOR
                         # ------------------------------------------
 
                         if (
                             profesor_id,
                             dia,
-                            bloque_id
+                            bloque_id,
                         ) in profes_ocupados:
 
                             continue
 
                         # ------------------------------------------
-                        # Paralelo
+                        # PARALELO
                         # ------------------------------------------
 
                         if (
                             paralelo,
                             dia,
-                            bloque_id
+                            bloque_id,
                         ) in paralelos_ocupados:
 
                             continue
 
                         # ------------------------------------------
-                        # Aula
+                        # AULA
                         # ------------------------------------------
 
                         aula = _buscar_aula_libre(
                             aulas_disponibles,
                             aulas_ocupadas,
                             dia,
-                            bloque_id
+                            bloque_id,
+                            aula_preferida,
                         )
 
                         if aula is None:
                             continue
 
-                        # ==================================================
-                        # DETERMINAR CONSECUTIVAS
-                        # ==================================================
-
-                        horas_restantes = (
-                            horas_totales
-                            - horas_asignadas
-                        )
-
-                        horas_a_tomar = min(
-                            max_consecutivas,
-                            horas_restantes
-                        )
-
-                        bloques_a_usar = [slot]
-
-                        aulas_a_usar = [aula]
-
-                        valido = True
-
                         # ------------------------------------------
-                        # Verificar bloques siguientes
+                        # CONSECUTIVAS
                         # ------------------------------------------
 
-                        for offset in range(
-                            1,
-                            horas_a_tomar
-                        ):
+                        consecutivas_actuales = 0
 
-                            siguiente_indice = (
-                                indice + offset
+                        if bloques_asignacion:
+
+                            ultimo_dia, ultimo_indice = (
+                                bloques_asignacion[-1]
                             )
 
                             if (
-                                siguiente_indice
-                                >= len(bloques_del_dia)
+                                ultimo_dia == dia
+                                and indice
+                                == ultimo_indice + 1
                             ):
 
-                                valido = False
-                                break
+                                consecutivas_actuales = 1
 
-                            siguiente = (
-                                bloques_del_dia[
-                                    siguiente_indice
-                                ]
-                            )
+                                for (
+                                    dia_anterior,
+                                    indice_anterior,
+                                ) in reversed(
+                                    bloques_asignacion
+                                ):
 
-                            siguiente_id = (
-                                siguiente[
-                                    "id_bloque_tiempo"
-                                ]
-                            )
+                                    if (
+                                        dia_anterior
+                                        != dia
+                                    ):
+                                        break
 
-                            # Profesor
-                            if (
-                                profesor_id,
-                                dia,
-                                siguiente_id
-                            ) in profes_ocupados:
+                                    if (
+                                        indice_anterior
+                                        == indice
+                                        - consecutivas_actuales
+                                    ):
+                                        consecutivas_actuales += 1
+                                    else:
+                                        break
 
-                                valido = False
-                                break
-
-                            # Paralelo
-                            if (
-                                paralelo,
-                                dia,
-                                siguiente_id
-                            ) in paralelos_ocupados:
-
-                                valido = False
-                                break
-
-                            # Aula
-                            siguiente_aula = (
-                                _buscar_aula_libre(
-                                    aulas_disponibles,
-                                    aulas_ocupadas,
-                                    dia,
-                                    siguiente_id
-                                )
-                            )
-
-                            if siguiente_aula is None:
-
-                                valido = False
-                                break
-
-                            bloques_a_usar.append(
-                                siguiente
-                            )
-
-                            aulas_a_usar.append(
-                                siguiente_aula
-                            )
-
-                        if not valido:
-                            continue
-
-                        # ==================================================
-                        # REGISTRAR BLOQUES
-                        # ==================================================
-
-                        for posicion, bloque in enumerate(
-                            bloques_a_usar
+                        if (
+                            not permite_consecutivas
+                            and bloques_asignacion
                         ):
 
-                            bloque_id = (
-                                bloque[
-                                    "id_bloque_tiempo"
-                                ]
+                            ultimo_dia, ultimo_indice = (
+                                bloques_asignacion[-1]
                             )
 
-                            aula_id = (
-                                aulas_a_usar[posicion]
+                            if (
+                                ultimo_dia == dia
+                                and indice
+                                == ultimo_indice + 1
+                            ):
+                                continue
+
+                        if (
+                            permite_consecutivas
+                            and consecutivas_actuales
+                            >= max_consecutivas
+                        ):
+                            continue
+
+                        # ------------------------------------------
+                        # DÍA UTILIZADO
+                        # ------------------------------------------
+
+                        dia_ya_usado = (
+                            dia
+                            in dias_usados[
+                                asignacion_id
+                            ]
+                        )
+
+                        # ------------------------------------------
+                        # HORA UTILIZADA
+                        # ------------------------------------------
+
+                        cantidad_hora = (
+                            horas_usadas[
+                                asignacion_id
+                            ].get(
+                                indice,
+                                0,
+                            )
+                        )
+
+                        # ------------------------------------------
+                        # CALCULAR PUNTUACIÓN
+                        # ------------------------------------------
+
+                        puntuacion = 0
+
+                        # Preferir días nuevos.
+                        if not dia_ya_usado:
+                            puntuacion += 500
+                        else:
+                            puntuacion -= 100
+
+                        # Preferir horas nuevas.
+                        if cantidad_hora == 0:
+                            puntuacion += 400
+                        else:
+                            puntuacion -= (
+                                cantidad_hora * 250
                             )
 
-                            # Registrar profesor
-                            profes_ocupados.add(
-                                (
-                                    profesor_id,
-                                    dia,
-                                    bloque_id
+                        # Aula preferida.
+                        if aula == aula_preferida:
+                            puntuacion += 100
+
+                        # Intentar distribuir la hora.
+                        puntuacion -= (
+                            indice * 5
+                        )
+
+                        # Si permite consecutivas,
+                        # favorecemos ligeramente continuidad.
+                        if permite_consecutivas:
+
+                            if (
+                                bloques_asignacion
+                            ):
+
+                                ultimo_dia, ultimo_indice = (
+                                    bloques_asignacion[-1]
                                 )
+
+                                if (
+                                    ultimo_dia == dia
+                                    and indice
+                                    == ultimo_indice + 1
+                                ):
+                                    puntuacion += 80
+
+                        # Si NO permite consecutivas,
+                        # penalizar estar cerca.
+                        else:
+
+                            if bloques_asignacion:
+
+                                for (
+                                    dia_anterior,
+                                    indice_anterior,
+                                ) in bloques_asignacion:
+
+                                    if (
+                                        dia_anterior
+                                        == dia
+                                    ):
+
+                                        distancia = abs(
+                                            indice
+                                            - indice_anterior
+                                        )
+
+                                        if distancia == 1:
+                                            puntuacion -= 300
+
+                                        elif distancia == 2:
+                                            puntuacion -= 50
+
+                        # Pequeña aleatoriedad para que
+                        # los intentos no sean idénticos.
+                        puntuacion += random.randint(
+                            0,
+                            100,
+                        )
+
+                        candidatos.append(
+                            (
+                                puntuacion,
+                                dia,
+                                indice,
+                                slot,
+                                aula,
                             )
+                        )
 
-                            # Registrar paralelo
-                            paralelos_ocupados.add(
-                                (
-                                    paralelo,
-                                    dia,
-                                    bloque_id
-                                )
-                            )
+                    # ==============================================
+                    # NO EXISTE CANDIDATO
+                    # ==============================================
 
-                            # Registrar aula
-                            aulas_ocupadas.add(
-                                (
-                                    aula_id,
-                                    dia,
-                                    bloque_id
-                                )
-                            )
+                    if not candidatos:
+                        return None
 
-                            horarios_a_insertar.append(
-                                (
-                                    institucion_id,
-                                    periodo_lectivo_id,
-                                    asignacion_id,
-                                    aula_id,
-                                    bloque_id,
-                                    dia
-                                )
-                            )
+                    # ==============================================
+                    # ORDENAR
+                    # ==============================================
 
-                            horas_asignadas += 1
+                    candidatos.sort(
+                        key=lambda x: -x[0]
+                    )
 
-                        dias_usados_por_asignacion[
+                    # ==============================================
+                    # TOMAR UNO DE LOS MEJORES
+                    # ==============================================
+
+                    cantidad_mejores = min(
+                        5,
+                        len(candidatos),
+                    )
+
+                    candidato = random.choice(
+                        candidatos[
+                            :cantidad_mejores
+                        ]
+                    )
+
+                    (
+                        puntuacion,
+                        dia,
+                        indice,
+                        slot,
+                        aula,
+                    ) = candidato
+
+                    bloque_id = slot[
+                        "id_bloque_tiempo"
+                    ]
+
+                    # ==============================================
+                    # REGISTRAR
+                    # ==============================================
+
+                    profes_ocupados.add(
+                        (
+                            profesor_id,
+                            dia,
+                            bloque_id,
+                        )
+                    )
+
+                    paralelos_ocupados.add(
+                        (
+                            paralelo,
+                            dia,
+                            bloque_id,
+                        )
+                    )
+
+                    aulas_ocupadas.add(
+                        (
+                            aula,
+                            dia,
+                            bloque_id,
+                        )
+                    )
+
+                    horarios.append(
+                        (
+                            institucion_id,
+                            periodo_lectivo_id,
+                            asignacion_id,
+                            aula,
+                            bloque_id,
+                            dia,
+                        )
+                    )
+
+                    bloques_asignacion.append(
+                        (
+                            dia,
+                            indice,
+                        )
+                    )
+
+                    dias_usados[
+                        asignacion_id
+                    ].add(dia)
+
+                    horas_usadas[
+                        asignacion_id
+                    ][
+                        indice
+                    ] = (
+                        horas_usadas[
                             asignacion_id
-                        ].add(dia)
+                        ].get(
+                            indice,
+                            0,
+                        )
+                        + 1
+                    )
 
-                        progreso = True
+                    horas_asignadas += 1
 
-                        break
+                # --------------------------------------------------
+                # Verificación de asignación
+                # --------------------------------------------------
 
-                    if progreso:
-                        break
+                if (
+                    horas_asignadas
+                    != horas_totales
+                ):
+                    return None
 
-                # ==================================================
-                # NO HAY MÁS ESPACIO
-                # ==================================================
+            return {
+                "horarios": horarios,
+                "profes_ocupados": profes_ocupados,
+                "paralelos_ocupados": paralelos_ocupados,
+                "aulas_ocupadas": aulas_ocupadas,
+            }
 
-                if not progreso:
-                    break
+        # ==========================================================
+        # 10. MÚLTIPLES INTENTOS
+        # ==========================================================
 
-            # ======================================================
-            # VERIFICACIÓN CRÍTICA
-            # ======================================================
+        #
+        # Esto es lo importante para tu problema.
+        #
+        # No confiamos en una sola generación.
+        #
+        # Probamos distintas combinaciones.
+        #
 
-            if horas_asignadas != horas_totales:
+        resultado_final = None
 
-                raise ValueError(
-                    "No fue posible completar la carga horaria. "
-                    f"Asignación: {asignacion_id}. "
-                    f"Materia: {asig['materia_nombre']}. "
-                    f"Paralelo: {paralelo}. "
-                    f"Requeridas: {horas_totales}. "
-                    f"Asignadas: {horas_asignadas}."
+        max_intentos = 300
+
+        for intento in range(
+            1,
+            max_intentos + 1,
+        ):
+
+            resultado = generar_intento()
+
+            if resultado is not None:
+
+                resultado_final = resultado
+
+                break
+
+        # ==========================================================
+        # 11. SI NO SE PUDO GENERAR
+        # ==========================================================
+
+        if resultado_final is None:
+
+            # ------------------------------------------------------
+            # Obtener información útil para diagnóstico.
+            # ------------------------------------------------------
+
+            detalles = []
+
+            for asig in asignaciones:
+
+                detalles.append(
+                    f"Asignación "
+                    f"{asig['id_asignacion_carga']}: "
+                    f"{asig['materia_nombre']} - "
+                    f"{asig['nombre_paralelo']} - "
+                    f"{int(asig['horas_por_semana'])} horas"
                 )
 
+            detalle_texto = "; ".join(
+                detalles
+            )
+
+            raise ValueError(
+                "No fue posible generar un horario "
+                "completo después de "
+                f"{max_intentos} intentos. "
+                "Es posible que las restricciones "
+                "actuales sean incompatibles. "
+                f"Asignaciones: {detalle_texto}"
+            )
+
         # ==========================================================
-        # 8. VERIFICAR QUE TENEMOS ALGO QUE INSERTAR
+        # 12. EXTRAER RESULTADO
         # ==========================================================
+
+        horarios_a_insertar = (
+            resultado_final[
+                "horarios"
+            ]
+        )
 
         if not horarios_a_insertar:
 
@@ -565,7 +904,54 @@ def optimizar_horarios_institucion(
             )
 
         # ==========================================================
-        # 9. AHORA SÍ ELIMINAMOS EL HORARIO ANTERIOR
+        # 13. VALIDACIÓN FINAL DE HORAS
+        # ==========================================================
+
+        horas_generadas = {}
+
+        for horario in horarios_a_insertar:
+
+            asignacion_id = horario[2]
+
+            horas_generadas[
+                asignacion_id
+            ] = (
+                horas_generadas.get(
+                    asignacion_id,
+                    0,
+                )
+                + 1
+            )
+
+        for asig in asignaciones:
+
+            asignacion_id = (
+                asig["id_asignacion_carga"]
+            )
+
+            requeridas = int(
+                asig["horas_por_semana"]
+            )
+
+            generadas = horas_generadas.get(
+                asignacion_id,
+                0,
+            )
+
+            if generadas != requeridas:
+
+                raise ValueError(
+                    "La validación final del horario "
+                    "falló. "
+                    f"Asignación: {asignacion_id}. "
+                    f"Materia: {asig['materia_nombre']}. "
+                    f"Paralelo: {asig['nombre_paralelo']}. "
+                    f"Requeridas: {requeridas}. "
+                    f"Generadas: {generadas}."
+                )
+
+        # ==========================================================
+        # 14. ELIMINAR HORARIO ANTERIOR
         # ==========================================================
 
         cur.execute(
@@ -576,12 +962,12 @@ def optimizar_horarios_institucion(
             """,
             (
                 institucion_id,
-                periodo_lectivo_id
+                periodo_lectivo_id,
             ),
         )
 
         # ==========================================================
-        # 10. INSERTAR NUEVO HORARIO
+        # 15. INSERTAR NUEVO HORARIO
         # ==========================================================
 
         args_str = b",".join(
@@ -596,7 +982,7 @@ def optimizar_horarios_institucion(
                     %s
                 )
                 """,
-                item
+                item,
             )
             for item in horarios_a_insertar
         )
@@ -617,7 +1003,7 @@ def optimizar_horarios_institucion(
         )
 
         # ==========================================================
-        # 11. COMMIT
+        # 16. COMMIT
         # ==========================================================
 
         conn.commit()
@@ -629,24 +1015,19 @@ def optimizar_horarios_institucion(
             "periodo_nombre": periodo["nombre"],
             "horarios_creados": len(
                 horarios_a_insertar
-            )
+            ),
+            "intentos_utilizados": intento,
+            "aulas_preferidas": (
+                aulas_preferidas_por_paralelo
+            ),
         }
 
     except Exception:
-        # ==========================================================
-        # SI FALLA CUALQUIER COSA:
-        #
-        # - INSERT
-        # - DELETE
-        # - VALIDACIÓN
-        # - GENERACIÓN
-        #
-        # TODO VUELVE ATRÁS.
-        # ==========================================================
 
         conn.rollback()
 
         raise
 
     finally:
+
         cur.close()
