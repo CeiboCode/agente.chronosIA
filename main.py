@@ -5,7 +5,7 @@ from solver import optimizar_horarios_institucion
 
 app = FastAPI(
     title="Chronos IA - Motor de Optimización",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 
@@ -19,6 +19,7 @@ def health():
     return {
         "success": True,
         "service": "chronos-ia-engine",
+        "version": "1.1.0",
     }
 
 
@@ -37,7 +38,7 @@ def ejecutar_motor(payload: GenerarHorarioRequest):
 
         return {
             "success": True,
-            "message": "Horarios generados y optimizados sin cruces con éxito",
+            "message": "Horario generado correctamente sin cruces de docentes ni cursos/paralelos.",
             "data": resultado,
         }
 
@@ -46,8 +47,12 @@ def ejecutar_motor(payload: GenerarHorarioRequest):
             conn.rollback()
 
         raise HTTPException(
-            status_code=400,
-            detail=str(e),
+            status_code=409,
+            detail={
+                "success": False,
+                "code": "HORARIO_NO_GENERABLE",
+                "message": str(e),
+            },
         ) from e
 
     except Exception as e:
@@ -56,7 +61,12 @@ def ejecutar_motor(payload: GenerarHorarioRequest):
 
         raise HTTPException(
             status_code=500,
-            detail=str(e),
+            detail={
+                "success": False,
+                "code": "ENGINE_ERROR",
+                "message": "Error interno del motor de horarios.",
+                "error": str(e),
+            },
         ) from e
 
     finally:
