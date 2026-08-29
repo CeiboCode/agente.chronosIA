@@ -1,3 +1,5 @@
+import traceback
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from database import get_db_connection
@@ -5,7 +7,7 @@ from solver import optimizar_horarios_institucion
 
 app = FastAPI(
     title="Chronos IA - Motor de Optimización",
-    version="1.1.0",
+    version="1.1.1",
 )
 
 
@@ -19,7 +21,7 @@ def health():
     return {
         "success": True,
         "service": "chronos-ia-engine",
-        "version": "1.1.0",
+        "version": "1.1.1",
     }
 
 
@@ -58,6 +60,8 @@ def ejecutar_motor(payload: GenerarHorarioRequest):
     except Exception as e:
         if conn:
             conn.rollback()
+
+        traceback.print_exc()
 
         raise HTTPException(
             status_code=500,
