@@ -158,6 +158,7 @@ def ejecutar(iteraciones):
 
         tiempos = []
         puntajes = []
+        ganancias = []
         fallos = []
 
         for numero in range(1, iteraciones + 1):
@@ -173,17 +174,22 @@ def ejecutar(iteraciones):
                 calidad = resultado.get("calidad") or {}
                 optimizacion = resultado.get("optimizacion_calidad") or {}
                 puntaje = float(calidad.get("puntaje", 0))
+                inicial = float(optimizacion.get("puntaje_inicial", puntaje))
+                final = float(optimizacion.get("puntaje_final", puntaje))
+                ganancia = final - inicial
+                intentados = int(optimizacion.get("intercambios_intentados", 0))
+                aceptados = int(optimizacion.get("mejoras_aceptadas", 0))
+
                 tiempos.append(duracion)
                 puntajes.append(puntaje)
+                ganancias.append(ganancia)
 
                 estado = "OK" if validacion["valido"] else "INVALIDO"
-                rondas = optimizacion.get("rondas_ejecutadas", 1)
-                evaluados = optimizacion.get("puntajes_evaluados", [puntaje])
                 print(
                     f"[{numero:02d}/{iteraciones:02d}] {estado} | "
                     f"{validacion['horarios']}/{validacion['esperadas']} clases | "
-                    f"calidad={puntaje:.2f} | tiempo={duracion:.2f}s | "
-                    f"rondas={rondas} | evaluados={evaluados}"
+                    f"calidad={inicial:.2f}->{final:.2f} (+{ganancia:.2f}) | "
+                    f"tiempo={duracion:.2f}s | swaps={aceptados}/{intentados}"
                 )
 
                 if not validacion["valido"]:
@@ -205,6 +211,9 @@ def ejecutar(iteraciones):
             print(f"Calidad promedio: {statistics.mean(puntajes):.2f}/100")
             print(f"Calidad mínima: {min(puntajes):.2f}/100")
             print(f"Calidad máxima: {max(puntajes):.2f}/100")
+        if ganancias:
+            print(f"Ganancia promedio búsqueda local: +{statistics.mean(ganancias):.2f}")
+            print(f"Ganancia máxima búsqueda local: +{max(ganancias):.2f}")
 
         if fallos:
             print("\nFallos detectados:")
