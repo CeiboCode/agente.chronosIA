@@ -9,8 +9,8 @@ from solver import (
     _cargar_slots,
     _evaluar_calidad_horario,
     _validar_resultado_final,
-    optimizar_horarios_institucion as _optimizar_base,
 )
+from solver_heuristic import optimizar_horarios_institucion as _optimizar_base
 
 
 MAX_INTERCAMBIOS = 350
@@ -183,7 +183,7 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
         resultado["calidad"] = calidad_mejor
 
     resultado["optimizacion_calidad"] = {
-        "metodo": "intercambios_seguros",
+        "metodo": "heuristica_continuidad_balance_mas_intercambios",
         "rondas_ejecutadas": 1,
         "puntaje_inicial": puntaje_inicial,
         "puntaje_final": max(puntaje_inicial, puntaje_final),
