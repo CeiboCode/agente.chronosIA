@@ -119,6 +119,40 @@ def _cargar_slots(cur, institucion_id, periodo_lectivo_id):
     return slots
 
 
+def _cargar_preferencias_optimizacion(cur, institucion_id):
+    defaults = {
+        "peso_huecos_docentes": 40,
+        "peso_huecos_grupos": 25,
+        "peso_balance_diario": 20,
+        "peso_distribucion_materias": 15,
+    }
+    try:
+        cur.execute(
+            """
+            SELECT peso_huecos_docentes, peso_huecos_grupos,
+                   peso_balance_diario, peso_distribucion_materias
+            FROM preferencias_optimizacion_horarios
+            WHERE institucion_id = %s
+            LIMIT 1;
+            """,
+            (institucion_id,),
+        )
+        fila = cur.fetchone()
+        if not fila:
+            return defaults
+        preferencias = {campo: int(fila[campo]) for campo in defaults}
+        if sum(preferencias.values()) != 100:
+            return defaults
+        return preferencias
+    except Exception as error:
+        if getattr(error, "pgcode", None) == "42P01":
+            conn = getattr(cur, "connection", None)
+            if conn is not None:
+                conn.rollback()
+            return defaults
+        raise
+
+
 def _validar_capacidad(asignaciones, slots_por_perfil):
     demanda_por_grupo = defaultdict(int)
     grupos_meta = {}
@@ -206,7 +240,6 @@ def _hora_a_minutos(valor):
 
 
 def _contar_huecos_largos(contenedor, tolerancia_minutos=30):
-    """Cuenta ventanas internas mayores al recreo normal; no penaliza pausas de hasta 30 min."""
     huecos = 0
     for items in contenedor.values():
         ordenados = sorted(items, key=lambda s: (s["hora_inicio"], s["hora_fin"]))
@@ -219,8 +252,7 @@ def _contar_huecos_largos(contenedor, tolerancia_minutos=30):
     return huecos
 
 
-def _evaluar_calidad_horario(asignaciones, slots, resultado):
-    """Evalúa calidad blanda de un horario ya válido. Mayor puntaje = mejor horario."""
+def _evaluar_calidad_horario(asignaciones, slots, resultado, preferencias):
     asignaciones_por_id = {int(a["id_asignacion_carga"]): a for a in asignaciones}
     slots_por_clave = {(int(s["id_bloque_tiempo"]), int(s["dia_indice"])): s for s in slots}
     dias_por_perfil = defaultdict(set)
@@ -276,11 +308,18 @@ def _evaluar_calidad_horario(asignaciones, slots, resultado):
     tasa_huecos_docente = huecos_docentes / jornadas_docente
     tasa_huecos_grupo = huecos_grupos / jornadas_grupo
 
-    penalizacion = 0.0
-    penalizacion += min(25.0, tasa_huecos_docente * 12.0)
-    penalizacion += min(25.0, tasa_huecos_grupo * 15.0)
-    penalizacion += min(25.0, desbalance_promedio * 5.0)
-    penalizacion += (1.0 - distribucion_ratio) * 35.0
+    riesgo_docentes = min(1.0, tasa_huecos_docente / 2.0)
+    riesgo_grupos = min(1.0, tasa_huecos_grupo / 2.0)
+    riesgo_balance = min(1.0, desbalance_promedio / 5.0)
+    riesgo_distribucion = max(0.0, 1.0 - distribucion_ratio)
+
+    componentes = {
+        "huecos_docentes": round(riesgo_docentes * preferencias["peso_huecos_docentes"], 2),
+        "huecos_grupos": round(riesgo_grupos * preferencias["peso_huecos_grupos"], 2),
+        "balance_diario": round(riesgo_balance * preferencias["peso_balance_diario"], 2),
+        "distribucion_materias": round(riesgo_distribucion * preferencias["peso_distribucion_materias"], 2),
+    }
+    penalizacion = sum(componentes.values())
     puntaje = round(max(0.0, 100.0 - penalizacion), 1)
 
     if puntaje >= 90:
@@ -300,6 +339,8 @@ def _evaluar_calidad_horario(asignaciones, slots, resultado):
         "desbalance_diario_promedio": desbalance_promedio,
         "asignaciones_bien_distribuidas": bien_distribuidas,
         "asignaciones_evaluadas": len(asignaciones),
+        "preferencias_aplicadas": preferencias,
+        "penalizacion_por_criterio": componentes,
     }
 
 
@@ -399,6 +440,7 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
         periodo = _validar_periodo(cur, institucion_id, periodo_lectivo_id)
         asignaciones = _cargar_asignaciones(cur, institucion_id, periodo_lectivo_id)
         slots = _cargar_slots(cur, institucion_id, periodo_lectivo_id)
+        preferencias = _cargar_preferencias_optimizacion(cur, institucion_id)
 
         slots_por_perfil = defaultdict(list)
         for slot in slots:
@@ -507,7 +549,7 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
                 continue
 
             candidatos_validos += 1
-            calidad = _evaluar_calidad_horario(asignaciones, slots, resultado)
+            calidad = _evaluar_calidad_horario(asignaciones, slots, resultado, preferencias)
             if calidad_final is None or calidad["puntaje"] > calidad_final["puntaje"]:
                 resultado_final = resultado
                 calidad_final = calidad
