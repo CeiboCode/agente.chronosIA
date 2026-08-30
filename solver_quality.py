@@ -11,6 +11,7 @@ from solver import (
     _validar_resultado_final,
 )
 from solver_heuristic import optimizar_horarios_institucion as _optimizar_base
+from solver_precheck import validar_capacidad_docentes
 
 
 MAX_INTERCAMBIOS = 350
@@ -126,8 +127,6 @@ def _optimizar_intercambios(
         item_i = candidato[i]
         item_j = candidato[j]
 
-        # Se intercambian únicamente día/bloque. Cada clase conserva su
-        # asignación, docente, materia y aula académica original.
         candidato[i] = (
             item_i[0], item_i[1], item_i[2], item_i[3], item_j[4], item_j[5]
         )
@@ -160,6 +159,8 @@ def _optimizar_intercambios(
 
 def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int, conn):
     """Genera una solución válida y mejora su calidad mediante intercambios seguros."""
+    validar_capacidad_docentes(conn, institucion_id, periodo_lectivo_id)
+
     resultado = _optimizar_base(institucion_id, periodo_lectivo_id, conn)
     horario_inicial = _capturar_horario(conn, institucion_id, periodo_lectivo_id)
     puntaje_inicial = float((resultado.get("calidad") or {}).get("puntaje", 0.0))
