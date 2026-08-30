@@ -4,7 +4,7 @@ import sys
 import time
 
 from database import get_db_connection
-from solver import optimizar_horarios_institucion
+from solver_quality import optimizar_horarios_institucion
 
 INSTITUCION_NOMBRE = "Colegio Stress Chronos"
 PERIODO_NOMBRE = "Stress 2026-2027"
@@ -171,16 +171,19 @@ def ejecutar(iteraciones):
                 duracion = time.perf_counter() - inicio
                 validacion = validar_bd(conn, institucion_id, periodo_lectivo_id)
                 calidad = resultado.get("calidad") or {}
+                optimizacion = resultado.get("optimizacion_calidad") or {}
                 puntaje = float(calidad.get("puntaje", 0))
                 tiempos.append(duracion)
                 puntajes.append(puntaje)
 
                 estado = "OK" if validacion["valido"] else "INVALIDO"
+                rondas = optimizacion.get("rondas_ejecutadas", 1)
+                evaluados = optimizacion.get("puntajes_evaluados", [puntaje])
                 print(
                     f"[{numero:02d}/{iteraciones:02d}] {estado} | "
                     f"{validacion['horarios']}/{validacion['esperadas']} clases | "
                     f"calidad={puntaje:.2f} | tiempo={duracion:.2f}s | "
-                    f"intentos={resultado.get('intentos_realizados')}"
+                    f"rondas={rondas} | evaluados={evaluados}"
                 )
 
                 if not validacion["valido"]:
