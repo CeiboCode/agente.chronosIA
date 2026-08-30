@@ -15,7 +15,7 @@ CASOS = {
     "teacher": {
         "institucion": "Colegio Stress Impossible Teacher",
         "periodo": "Impossible Teacher 2026-2027",
-        "espera_fragmento": "No fue posible generar un horario completo",
+        "espera_fragmento": "capacidad disponible de algunos docentes",
         "descripcion": "un docente compartido requiere 40 bloques y solo dispone de 35",
     },
 }
