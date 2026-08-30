@@ -140,12 +140,16 @@ def _validar_capacidad(asignaciones, slots_por_perfil):
 
 
 def _racha_consecutiva(bloques_asignacion, dia, orden_bloque):
-    ordenes = sorted(orden for dia_usado, orden in bloques_asignacion if dia_usado == dia)
+    ordenes = {orden for dia_usado, orden in bloques_asignacion if dia_usado == dia}
     consecutivas = 1
     anterior = orden_bloque - 1
     while anterior in ordenes:
         consecutivas += 1
         anterior -= 1
+    siguiente = orden_bloque + 1
+    while siguiente in ordenes:
+        consecutivas += 1
+        siguiente += 1
     return consecutivas
 
 
@@ -154,11 +158,7 @@ def _intervalo_profesor_disponible(intervalos, inicio, fin):
 
 
 def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int, conn):
-    """
-    Genera horarios por Curso + Paralelo usando el perfil horario asignado.
-    Si el curso/paralelo no tiene perfil explícito, usa el perfil general del período + turno.
-    Los conflictos docentes se validan por intervalo real de hora, incluso entre perfiles distintos.
-    """
+    """Genera horarios por Curso + Paralelo respetando perfiles y consecutivas por materia."""
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         periodo = _validar_periodo(cur, institucion_id, periodo_lectivo_id)
@@ -222,8 +222,18 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
                         puntuacion += 300 if rep == 0 else -rep * 180
                         clases_grupo_dia = sum(1 for g, d, _ in grupo_ocupado if g == grupo and d == dia)
                         puntuacion -= clases_grupo_dia * 20
-                        if permite_consecutivas and any(d == dia and o == orden_bloque - 1 for d, o in usados):
-                            puntuacion += 60
+
+                        # Una materia marcada como consecutiva debe preferir completar
+                        # una pareja/racha antes de abrir otro día. El código anterior
+                        # premiaba demasiado usar días nuevos (+500), por eso Inglés
+                        # podía quedar disperso aunque max_horas_consecutivas fuera 2.
+                        if permite_consecutivas:
+                            tiene_adyacente = any(d == dia and abs(o - orden_bloque) == 1 for d, o in usados)
+                            if tiene_adyacente:
+                                puntuacion += 1400
+                            elif usados:
+                                puntuacion -= 250
+
                         puntuacion += random.randint(0, 100)
                         candidatos.append((puntuacion, slot))
 
@@ -231,7 +241,7 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
                         return None
 
                     candidatos.sort(key=lambda item: -item[0])
-                    _, slot = random.choice(candidatos[: min(5, len(candidatos))])
+                    _, slot = random.choice(candidatos[: min(3, len(candidatos))])
                     dia = int(slot["dia_indice"])
                     bloque_id = slot["id_bloque_tiempo"]
                     orden_bloque = int(slot["orden_bloque"])
