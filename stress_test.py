@@ -57,8 +57,8 @@ def validar_bd(conn, institucion_id, periodo_lectivo_id):
         )
         horarios = int(cur.fetchone()[0])
 
-        -- Detecta solapes de docentes por intervalo real, incluso cuando
-        -- las clases pertenecen a perfiles con bloques de IDs distintos.
+        # Detecta solapes por intervalo real, incluso entre perfiles cuyos
+        # bloques tienen IDs y duraciones diferentes.
         cur.execute(
             """
             SELECT COUNT(*)
