@@ -6,11 +6,22 @@ import time
 from database import get_db_connection
 from solver_quality import optimizar_horarios_institucion
 
-INSTITUCION_NOMBRE = "Colegio Stress Chronos"
-PERIODO_NOMBRE = "Stress 2026-2027"
+ESCENARIOS = {
+    "baseline": {
+        "institucion": "Colegio Stress Chronos",
+        "periodo": "Stress 2026-2027",
+        "seed": "database/seed_motor_stress.sql",
+    },
+    "hard": {
+        "institucion": "Colegio Stress Hard Chronos",
+        "periodo": "Stress Hard 2026-2027",
+        "seed": "database/seed_motor_stress_hard.sql",
+    },
+}
 
 
-def obtener_contexto(conn):
+def obtener_contexto(conn, escenario):
+    config = ESCENARIOS[escenario]
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -22,15 +33,15 @@ def obtener_contexto(conn):
             ORDER BY pl.id_periodo_lectivo DESC
             LIMIT 1
             """,
-            (INSTITUCION_NOMBRE, PERIODO_NOMBRE),
+            (config["institucion"], config["periodo"]),
         )
         fila = cur.fetchone()
     if not fila:
         raise RuntimeError(
-            "No existe el escenario de stress. Ejecuta primero "
-            "database/seed_motor_stress.sql en la base de datos."
+            f"No existe el escenario '{escenario}'. Ejecuta primero "
+            f"{config['seed']} en la base de datos."
         )
-    return int(fila[0]), int(fila[1])
+    return int(fila[0]), int(fila[1]), config
 
 
 def validar_bd(conn, institucion_id, periodo_lectivo_id):
@@ -46,21 +57,26 @@ def validar_bd(conn, institucion_id, periodo_lectivo_id):
         )
         horarios = int(cur.fetchone()[0])
 
+        -- Detecta solapes de docentes por intervalo real, incluso cuando
+        -- las clases pertenecen a perfiles con bloques de IDs distintos.
         cur.execute(
             """
             SELECT COUNT(*)
-            FROM (
-              SELECT h.profesor_id, h.dia_indice, h.bloque_tiempo_id, COUNT(*)
-              FROM (
-                SELECT ac.profesor_id, ho.dia_indice, ho.bloque_tiempo_id
-                FROM horarios ho
-                JOIN asignaciones_carga ac ON ac.id_asignacion_carga = ho.asignacion_carga_id
-                WHERE ho.institucion_id = %s
-                  AND ho.periodo_lectivo_id = %s
-              ) h
-              GROUP BY h.profesor_id, h.dia_indice, h.bloque_tiempo_id
-              HAVING COUNT(*) > 1
-            ) x
+            FROM horarios h1
+            JOIN asignaciones_carga ac1 ON ac1.id_asignacion_carga = h1.asignacion_carga_id
+            JOIN bloques_tiempo bt1 ON bt1.id_bloque_tiempo = h1.bloque_tiempo_id
+            JOIN horarios h2
+              ON h2.institucion_id = h1.institucion_id
+             AND h2.periodo_lectivo_id = h1.periodo_lectivo_id
+             AND h2.dia_indice = h1.dia_indice
+             AND h2.id_horario > h1.id_horario
+            JOIN asignaciones_carga ac2 ON ac2.id_asignacion_carga = h2.asignacion_carga_id
+            JOIN bloques_tiempo bt2 ON bt2.id_bloque_tiempo = h2.bloque_tiempo_id
+            WHERE h1.institucion_id = %s
+              AND h1.periodo_lectivo_id = %s
+              AND ac1.profesor_id = ac2.profesor_id
+              AND bt1.hora_inicio < bt2.hora_fin
+              AND bt2.hora_inicio < bt1.hora_fin
             """,
             (institucion_id, periodo_lectivo_id),
         )
@@ -69,16 +85,24 @@ def validar_bd(conn, institucion_id, periodo_lectivo_id):
         cur.execute(
             """
             SELECT COUNT(*)
-            FROM (
-              SELECT a.curso_id, a.paralelo_id, ho.dia_indice, ho.bloque_tiempo_id, COUNT(*)
-              FROM horarios ho
-              JOIN asignaciones_carga ac ON ac.id_asignacion_carga = ho.asignacion_carga_id
-              JOIN aulas a ON a.id_aula = ac.aula_id
-              WHERE ho.institucion_id = %s
-                AND ho.periodo_lectivo_id = %s
-              GROUP BY a.curso_id, a.paralelo_id, ho.dia_indice, ho.bloque_tiempo_id
-              HAVING COUNT(*) > 1
-            ) x
+            FROM horarios h1
+            JOIN asignaciones_carga ac1 ON ac1.id_asignacion_carga = h1.asignacion_carga_id
+            JOIN aulas a1 ON a1.id_aula = ac1.aula_id
+            JOIN bloques_tiempo bt1 ON bt1.id_bloque_tiempo = h1.bloque_tiempo_id
+            JOIN horarios h2
+              ON h2.institucion_id = h1.institucion_id
+             AND h2.periodo_lectivo_id = h1.periodo_lectivo_id
+             AND h2.dia_indice = h1.dia_indice
+             AND h2.id_horario > h1.id_horario
+            JOIN asignaciones_carga ac2 ON ac2.id_asignacion_carga = h2.asignacion_carga_id
+            JOIN aulas a2 ON a2.id_aula = ac2.aula_id
+            JOIN bloques_tiempo bt2 ON bt2.id_bloque_tiempo = h2.bloque_tiempo_id
+            WHERE h1.institucion_id = %s
+              AND h1.periodo_lectivo_id = %s
+              AND a1.curso_id = a2.curso_id
+              AND a1.paralelo_id = a2.paralelo_id
+              AND bt1.hora_inicio < bt2.hora_fin
+              AND bt2.hora_inicio < bt1.hora_fin
             """,
             (institucion_id, periodo_lectivo_id),
         )
@@ -147,13 +171,13 @@ def validar_bd(conn, institucion_id, periodo_lectivo_id):
     }
 
 
-def ejecutar(iteraciones):
+def ejecutar(iteraciones, escenario):
     conn = get_db_connection()
     try:
-        institucion_id, periodo_lectivo_id = obtener_contexto(conn)
+        institucion_id, periodo_lectivo_id, config = obtener_contexto(conn, escenario)
         print(
-            f"Escenario: {INSTITUCION_NOMBRE} | institución={institucion_id} | "
-            f"período={periodo_lectivo_id} | iteraciones={iteraciones}"
+            f"Escenario: {config['institucion']} | institución={institucion_id} | "
+            f"período={periodo_lectivo_id} | iteraciones={iteraciones} | tipo={escenario}"
         )
 
         tiempos = []
@@ -189,7 +213,9 @@ def ejecutar(iteraciones):
                     f"[{numero:02d}/{iteraciones:02d}] {estado} | "
                     f"{validacion['horarios']}/{validacion['esperadas']} clases | "
                     f"calidad={inicial:.2f}->{final:.2f} (+{ganancia:.2f}) | "
-                    f"tiempo={duracion:.2f}s | swaps={aceptados}/{intentados}"
+                    f"tiempo={duracion:.2f}s | swaps={aceptados}/{intentados} | "
+                    f"choques_doc={validacion['conflictos_docente']} | "
+                    f"choques_grupo={validacion['conflictos_grupo']}"
                 )
 
                 if not validacion["valido"]:
@@ -202,6 +228,7 @@ def ejecutar(iteraciones):
 
         exitos = iteraciones - len(fallos)
         print("\n=== RESUMEN STRESS TEST ===")
+        print(f"Escenario: {escenario}")
         print(f"Ejecuciones válidas: {exitos}/{iteraciones}")
         print(f"Tasa de éxito: {(exitos / iteraciones) * 100:.1f}%")
         if tiempos:
@@ -235,10 +262,16 @@ def main():
         default=20,
         help="Cantidad de generaciones consecutivas (por defecto: 20)",
     )
+    parser.add_argument(
+        "--scenario",
+        choices=sorted(ESCENARIOS.keys()),
+        default="baseline",
+        help="Escenario a ejecutar: baseline o hard (por defecto: baseline)",
+    )
     args = parser.parse_args()
     if args.runs < 1:
         parser.error("--runs debe ser mayor o igual a 1")
-    sys.exit(ejecutar(args.runs))
+    sys.exit(ejecutar(args.runs, args.scenario))
 
 
 if __name__ == "__main__":
