@@ -3,6 +3,7 @@ from collections import defaultdict
 from psycopg2.extras import RealDictCursor
 
 from solver import _cargar_asignaciones, _cargar_slots
+from restricciones_docentes import cargar_restricciones_docentes, slot_no_disponible
 
 
 def _max_intervalos_no_solapados(intervalos):
@@ -19,15 +20,15 @@ def _max_intervalos_no_solapados(intervalos):
 def validar_capacidad_docentes(conn, institucion_id: int, periodo_lectivo_id: int):
     """Rechaza cargas docentes imposibles antes de ejecutar la heurística.
 
-    Calcula una cota superior segura: para cada docente toma todos los slots de
-    los perfiles que realmente utiliza y obtiene el máximo número de intervalos
-    no solapados que podría impartir por semana. Si su demanda supera incluso
-    esa cota superior, el horario es matemáticamente imposible.
+    Considera los perfiles usados por cada docente, sus bloques no disponibles
+    y el máximo de bloques diarios configurado. El máximo de consecutivos se
+    valida durante la construcción del horario porque depende del orden final.
     """
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         asignaciones = _cargar_asignaciones(cur, institucion_id, periodo_lectivo_id)
         slots = _cargar_slots(cur, institucion_id, periodo_lectivo_id)
+        restricciones = cargar_restricciones_docentes(cur, institucion_id, periodo_lectivo_id)
     finally:
         cur.close()
 
@@ -50,24 +51,30 @@ def validar_capacidad_docentes(conn, institucion_id: int, periodo_lectivo_id: in
         intervalos_por_dia = defaultdict(set)
         for perfil_id in perfiles_por_profesor[profesor_id]:
             for slot in slots_por_perfil.get(perfil_id, []):
+                if slot_no_disponible(restricciones, profesor_id, slot):
+                    continue
                 dia = int(slot["dia_indice"])
                 intervalos_por_dia[dia].add((slot["hora_inicio"], slot["hora_fin"]))
 
-        capacidad = sum(
-            _max_intervalos_no_solapados(list(intervalos))
-            for intervalos in intervalos_por_dia.values()
-        )
+        regla = restricciones["reglas"].get(profesor_id) or {}
+        max_dia = regla.get("max_bloques_dia")
+        capacidad = 0
+        for intervalos in intervalos_por_dia.values():
+            capacidad_dia = _max_intervalos_no_solapados(list(intervalos))
+            if max_dia is not None:
+                capacidad_dia = min(capacidad_dia, int(max_dia))
+            capacidad += capacidad_dia
 
         if demanda > capacidad:
             meta = meta_profesor[profesor_id]
             problemas.append(
                 f"{meta['profesor_nombre']}: requiere {demanda} bloques semanales "
-                f"y solo dispone de {capacidad} bloques compatibles no solapados"
+                f"y sus restricciones solo permiten {capacidad} bloques compatibles"
             )
 
     if problemas:
         raise ValueError(
-            "La carga semanal excede la capacidad disponible de algunos docentes. "
+            "La carga semanal excede la disponibilidad configurada de algunos docentes. "
             + "; ".join(problemas)
         )
 
