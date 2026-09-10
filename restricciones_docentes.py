@@ -98,6 +98,54 @@ def penalizacion_preferencias(restricciones, profesor_id: int, secuencia, orden_
     return penalizacion
 
 
+def _contar_huecos(slots_dia) -> int:
+    ordenados = sorted(slots_dia, key=lambda s: (s["hora_inicio"], s["hora_fin"]))
+    huecos = 0
+    for indice in range(1, len(ordenados)):
+        if ordenados[indice]["hora_inicio"] > ordenados[indice - 1]["hora_fin"]:
+            huecos += 1
+    return huecos
+
+
+def contar_preferencias_incumplidas(asignaciones, slots, horario, restricciones) -> int:
+    asignaciones_por_id = {int(a["id_asignacion_carga"]): a for a in asignaciones}
+    slots_por_clave = {(int(s["id_bloque_tiempo"]), int(s["dia_indice"])): s for s in slots}
+    profesor_por_dia = defaultdict(list)
+    extremos = {}
+
+    for slot in slots:
+        clave = (int(slot["perfil_horario_id"]), int(slot["dia_indice"]))
+        orden = int(slot["orden_bloque"])
+        if clave not in extremos:
+            extremos[clave] = [orden, orden]
+        else:
+            extremos[clave][0] = min(extremos[clave][0], orden)
+            extremos[clave][1] = max(extremos[clave][1], orden)
+
+    for item in horario:
+        asig = asignaciones_por_id.get(int(item[2]))
+        slot = slots_por_clave.get((int(item[4]), int(item[5])))
+        if not asig or not slot:
+            continue
+        profesor_por_dia[(int(asig["profesor_id"]), int(item[5]))].append(slot)
+
+    incumplimientos = 0
+    for (profesor_id, _dia), items in profesor_por_dia.items():
+        regla = restricciones["reglas"].get(profesor_id)
+        if not regla:
+            continue
+        if regla.get("evitar_huecos", True):
+            incumplimientos += _contar_huecos(items)
+        for slot in items:
+            minimo, maximo = extremos[(int(slot["perfil_horario_id"]), int(slot["dia_indice"]))]
+            orden = int(slot["orden_bloque"])
+            if regla.get("evitar_primera_hora") and orden == minimo:
+                incumplimientos += 1
+            if regla.get("evitar_ultima_hora") and orden == maximo:
+                incumplimientos += 1
+    return incumplimientos
+
+
 def validar_horario_restricciones(asignaciones, slots, horario, restricciones):
     asignaciones_por_id = {int(a["id_asignacion_carga"]): a for a in asignaciones}
     slots_por_clave = {(int(s["id_bloque_tiempo"]), int(s["dia_indice"])): s for s in slots}
