@@ -16,6 +16,12 @@ from solver import (
     _validar_periodo,
     _validar_resultado_final,
 )
+from restricciones_docentes import (
+    cargar_restricciones_docentes,
+    penalizacion_preferencias,
+    secuencia_permitida,
+    validar_horario_restricciones,
+)
 
 
 def _hora_a_minutos(valor):
@@ -52,13 +58,23 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
         asignaciones = _cargar_asignaciones(cur, institucion_id, periodo_lectivo_id)
         slots = _cargar_slots(cur, institucion_id, periodo_lectivo_id)
         preferencias = _cargar_preferencias_optimizacion(cur, institucion_id)
+        restricciones = cargar_restricciones_docentes(cur, institucion_id, periodo_lectivo_id)
 
         slots_por_perfil = defaultdict(list)
         dias_por_perfil = defaultdict(set)
+        extremos_por_perfil_dia = {}
         for slot in slots:
             perfil_id = int(slot["perfil_horario_id"])
+            dia = int(slot["dia_indice"])
             slots_por_perfil[perfil_id].append(slot)
-            dias_por_perfil[perfil_id].add(int(slot["dia_indice"]))
+            dias_por_perfil[perfil_id].add(dia)
+            clave = (perfil_id, dia)
+            orden = int(slot["orden_bloque"])
+            if clave not in extremos_por_perfil_dia:
+                extremos_por_perfil_dia[clave] = [orden, orden]
+            else:
+                extremos_por_perfil_dia[clave][0] = min(extremos_por_perfil_dia[clave][0], orden)
+                extremos_por_perfil_dia[clave][1] = max(extremos_por_perfil_dia[clave][1], orden)
 
         perfiles_sin_bloques = sorted(
             {
@@ -129,6 +145,14 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
                         clave_profesor = (profesor_id, dia)
                         clave_grupo = (grupo, dia)
 
+                        if not secuencia_permitida(
+                            restricciones,
+                            profesor_id,
+                            profesor_slots_dia[clave_profesor],
+                            secuencia,
+                        ):
+                            continue
+
                         if any(
                             not _intervalo_profesor_disponible(
                                 profesor_intervalos[clave_profesor],
@@ -154,17 +178,13 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
                             continue
 
                         puntuacion = 0
-
-                        # Distribuir cada materia por distintos días sigue siendo prioritario.
                         puntuacion += 520 if dia not in dias_usados[asignacion_id] else -180
 
-                        # Evitar que una materia caiga siempre en la misma posición del día.
                         for slot in secuencia:
                             orden = int(slot["orden_bloque"])
                             repeticiones = posiciones_usadas[asignacion_id][orden]
                             puntuacion += 110 if repeticiones == 0 else -(repeticiones * 80)
 
-                        # Balancear la carga diaria del curso/paralelo.
                         dias_disponibles = max(1, len(dias_por_perfil[perfil_id]))
                         objetivo_diario = carga_grupo_total[grupo] / dias_disponibles
                         carga_actual = carga_grupo_dia[clave_grupo]
@@ -172,30 +192,36 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
                         puntuacion -= int(abs(carga_resultante - objetivo_diario) * 70)
                         puntuacion -= carga_actual * 30
 
-                        # Premiar continuidad y castigar la creación de huecos reales.
                         profesor_actual = profesor_slots_dia[clave_profesor]
                         grupo_actual = grupo_slots_dia[clave_grupo]
+                        regla_docente = restricciones["reglas"].get(profesor_id) or {}
 
-                        huecos_profesor_antes = _contar_huecos_lista(profesor_actual)
-                        huecos_profesor_despues = _contar_huecos_lista(profesor_actual + secuencia)
-                        delta_huecos_profesor = huecos_profesor_despues - huecos_profesor_antes
-                        puntuacion -= delta_huecos_profesor * 260
+                        if regla_docente.get("evitar_huecos", True):
+                            huecos_profesor_antes = _contar_huecos_lista(profesor_actual)
+                            huecos_profesor_despues = _contar_huecos_lista(profesor_actual + secuencia)
+                            puntuacion -= (huecos_profesor_despues - huecos_profesor_antes) * 260
 
                         huecos_grupo_antes = _contar_huecos_lista(grupo_actual)
                         huecos_grupo_despues = _contar_huecos_lista(grupo_actual + secuencia)
-                        delta_huecos_grupo = huecos_grupo_despues - huecos_grupo_antes
-                        puntuacion -= delta_huecos_grupo * 180
+                        puntuacion -= (huecos_grupo_despues - huecos_grupo_antes) * 180
 
                         if _es_adyacente(profesor_actual, secuencia):
                             puntuacion += 150
                         if _es_adyacente(grupo_actual, secuencia):
                             puntuacion += 110
 
-                        # Bloques dobles permitidos deben conservar prioridad suficiente.
+                        orden_minimo, orden_maximo = extremos_por_perfil_dia[(perfil_id, dia)]
+                        puntuacion -= penalizacion_preferencias(
+                            restricciones,
+                            profesor_id,
+                            secuencia,
+                            orden_minimo,
+                            orden_maximo,
+                        )
+
                         if tamano_bloque > 1:
                             puntuacion += tamano_bloque * 700
 
-                        # Mantiene diversidad entre intentos sin dominar los criterios de calidad.
                         puntuacion += random.randint(0, 60)
                         candidatos.append((puntuacion, secuencia))
 
@@ -204,7 +230,6 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
 
                     candidatos.sort(key=lambda item: -item[0])
                     top = min(3, len(candidatos))
-                    # 75% el mejor; 25% uno de los siguientes para conservar exploración.
                     if top == 1 or random.random() < 0.75:
                         _, secuencia = candidatos[0]
                     else:
@@ -264,6 +289,7 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
             if resultado is None:
                 continue
 
+            validar_horario_restricciones(asignaciones, slots, resultado, restricciones)
             candidatos_validos += 1
             calidad = _evaluar_calidad_horario(
                 asignaciones, slots, resultado, preferencias
@@ -284,16 +310,17 @@ def optimizar_horarios_institucion(institucion_id: int, periodo_lectivo_id: int,
             raise ValueError(
                 "No fue posible generar un horario completo después de "
                 + str(max_intentos)
-                + " intentos. Revisa carga, perfiles, turnos, consecutivas y disponibilidad. Asignaciones: "
+                + " intentos. Revisa carga, perfiles, turnos, consecutivas y restricciones docentes. Asignaciones: "
                 + "; ".join(detalles)
             )
 
         validacion_final = _validar_resultado_final(
             asignaciones, slots, resultado_final
         )
+        validar_horario_restricciones(asignaciones, slots, resultado_final, restricciones)
         calidad_final["candidatos_validos_evaluados"] = candidatos_validos
         calidad_final["intentos_realizados"] = intentos_realizados
-        calidad_final["heuristica_inicial"] = "continuidad_balance_v2"
+        calidad_final["heuristica_inicial"] = "continuidad_balance_restricciones_v3"
 
         cur.execute(
             "DELETE FROM horarios WHERE institucion_id = %s AND periodo_lectivo_id = %s",
