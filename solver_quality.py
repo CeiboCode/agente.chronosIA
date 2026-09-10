@@ -4,7 +4,11 @@ from contextvars import ContextVar
 from psycopg2.extras import RealDictCursor
 import solver as solver_base
 
-from restricciones_docentes import cargar_restricciones_docentes, validar_horario_restricciones
+from restricciones_docentes import (
+    cargar_restricciones_docentes,
+    contar_preferencias_incumplidas,
+    validar_horario_restricciones,
+)
 
 _periodo_contexto = ContextVar("periodo_optimizacion", default=None)
 
@@ -52,7 +56,7 @@ def _optimizar_intercambios(i,p,asignaciones,slots,prefs,inicial,restricciones):
         a=por_id[int(item[2])];indices[(int(a["curso_id"]),int(a["paralelo_id"]))].append(n)
     grupos=[x for x in indices.values() if len(x)>=2]
     if not grupos:return inicial,_evaluar_calidad_horario(asignaciones,slots,inicial,prefs),0,0
-    mejor=list(inicial);calidad=_evaluar_calidad_horario(asignaciones,slots,mejor,prefs);puntaje=float(calidad["puntaje"]);mejoras=intentos=sin=0
+    mejor=list(inicial);calidad=_evaluar_calidad_horario(asignaciones,slots,mejor,prefs);puntaje=float(calidad["puntaje"]);preferencias_incumplidas=contar_preferencias_incumplidas(asignaciones,slots,mejor,restricciones);mejoras=intentos=sin=0
     while intentos<MAX_INTERCAMBIOS and sin<MAX_SIN_MEJORA:
         if puntaje>=OBJETIVO_CALIDAD:break
         intentos+=1;i1,i2=random.sample(random.choice(grupos),2);cand=list(mejor);x,y=cand[i1],cand[i2]
@@ -62,8 +66,12 @@ def _optimizar_intercambios(i,p,asignaciones,slots,prefs,inicial,restricciones):
             validar_horario_restricciones(asignaciones,slots,cand,restricciones)
         except ValueError:
             sin+=1;continue
+        nuevas_preferencias=contar_preferencias_incumplidas(asignaciones,slots,cand,restricciones)
+        if nuevas_preferencias>preferencias_incumplidas:
+            sin+=1;continue
         nueva=_evaluar_calidad_horario(asignaciones,slots,cand,prefs);np=float(nueva["puntaje"])
-        if np>puntaje:mejor,calidad,puntaje=cand,nueva,np;mejoras+=1;sin=0
+        if np>puntaje:
+            mejor,calidad,puntaje=cand,nueva,np;preferencias_incumplidas=nuevas_preferencias;mejoras+=1;sin=0
         else:sin+=1
     return mejor,calidad,mejoras,intentos
 
@@ -77,6 +85,6 @@ def optimizar_horarios_institucion(institucion_id:int,periodo_lectivo_id:int,con
         mejor,calidad,mejoras,intentos=_optimizar_intercambios(institucion_id,periodo_lectivo_id,asignaciones,slots,prefs,inicial,restricciones);pf=float(calidad.get("puntaje",pi))
         validar_horario_restricciones(asignaciones,slots,mejor,restricciones)
         if pf>pi:_guardar_horario(conn,institucion_id,periodo_lectivo_id,mejor);resultado["calidad"]=calidad
-        resultado["optimizacion_calidad"]={"metodo":"heuristica_continuidad_balance_restricciones_mas_intercambios","rondas_ejecutadas":1,"puntaje_inicial":pi,"puntaje_final":max(pi,pf),"puntajes_evaluados":[pi,max(pi,pf)],"intercambios_intentados":intentos,"mejoras_aceptadas":mejoras,"objetivo_calidad":OBJETIVO_CALIDAD}
+        resultado["optimizacion_calidad"]={"metodo":"heuristica_continuidad_balance_restricciones_mas_intercambios","rondas_ejecutadas":1,"puntaje_inicial":pi,"puntaje_final":max(pi,pf),"puntajes_evaluados":[pi,max(pi,pf)],"intercambios_intentados":intentos,"mejoras_aceptadas":mejoras,"objetivo_calidad":OBJETIVO_CALIDAD,"preferencias_docentes_incumplidas":contar_preferencias_incumplidas(asignaciones,slots,mejor,restricciones)}
         return resultado
     finally:_periodo_contexto.reset(token)
